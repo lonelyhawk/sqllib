@@ -305,21 +305,21 @@ AS
 			@res INT, @sql NVARCHAR(4000);
 		BEGIN TRANSACTION;
 		BEGIN TRY
-			IF OBJECT_ID('cdc.fn_cdc_get_all_changes_' + @cdcTableNameBase, 'SN') IS NOT NULL
+			IF OBJECT_ID(QUOTENAME(@source_schema)+'.fn_cdc_get_all_changes_' + @cdcTableNameBase, 'SN') IS NOT NULL
 				BEGIN
 					IF @suppressMessages = 0
-						PRINT 'Dropping the ALL_CHANGES synonym: cdc.fn_cdc_get_all_changes_' + @cdcTableNameBase;
+						PRINT 'Dropping the ALL_CHANGES synonym: '+QUOTENAME(@source_schema)+'.fn_cdc_get_all_changes_' + @cdcTableNameBase;
 
-					SET @sql = N'DROP SYNONYM cdc.' + QUOTENAME('fn_cdc_get_all_changes_' + @cdcTableNameBase);
+					SET @sql = N'DROP SYNONYM '+QUOTENAME(@source_schema)+'.' + QUOTENAME('fn_cdc_get_all_changes_' + @cdcTableNameBase);
 					EXEC sp_executesql @sql;
 				END;
 
-			IF OBJECT_ID('cdc.fn_cdc_get_net_changes_' + @cdcTableNameBase, 'SN') IS NOT NULL
+			IF OBJECT_ID(QUOTENAME(@source_schema)+'.fn_cdc_get_net_changes_' + @cdcTableNameBase, 'SN') IS NOT NULL
 				BEGIN
 					IF @suppressMessages = 0
-						PRINT 'Dropping the NET_CHANGES synonym: cdc.fn_cdc_get_net_changes_' + @cdcTableNameBase;
+						PRINT 'Dropping the NET_CHANGES synonym: '+QUOTENAME(@source_schema)+'.fn_cdc_get_net_changes_' + @cdcTableNameBase;
 
-					SET @sql = N'DROP SYNONYM cdc.' + QUOTENAME('fn_cdc_get_net_changes_' + @cdcTableNameBase);
+					SET @sql = N'DROP SYNONYM '+QUOTENAME(@source_schema)+'.' + QUOTENAME('fn_cdc_get_net_changes_' + @cdcTableNameBase);
 					EXEC sp_executesql @sql;
 				END;
 
@@ -339,8 +339,8 @@ AS
 						THROW 50000, 'Unexpected error in sys.sp_cdc_enable_table', 16;
 
 					IF @suppressMessages = 0
-						PRINT 'Creating the ALL_CHANGES synonym: cdc.fn_cdc_get_all_changes_' + @cdcTableNameBase;
-					SET @sql = N'CREATE SYNONYM cdc.' + QUOTENAME('fn_cdc_get_all_changes_' + @cdcTableNameBase) + N' FOR cdc.'
+						PRINT 'Creating the ALL_CHANGES synonym: '+QUOTENAME(@source_schema)+'.fn_cdc_get_all_changes_' + @cdcTableNameBase;
+					SET @sql = N'CREATE SYNONYM '+QUOTENAME(@source_schema)+'.' + QUOTENAME('fn_cdc_get_all_changes_' + @cdcTableNameBase) + N' FOR cdc.'
 							   + QUOTENAME('fn_cdc_get_all_changes_' + @cdc_capture_instance);
 					EXEC sp_executesql @sql;
 
@@ -348,7 +348,7 @@ AS
 						BEGIN
 							IF @suppressMessages = 0
 								PRINT 'Creating the NET_CHANGES synonym: cdc.fn_cdc_get_net_changes_' + @cdcTableNameBase;
-							SET @sql = N'CREATE SYNONYM cdc.' + QUOTENAME('fn_cdc_get_net_changes_' + @cdcTableNameBase) + N' FOR cdc.'
+							SET @sql = N'CREATE SYNONYM '+QUOTENAME(@source_schema)+'.' + QUOTENAME('fn_cdc_get_net_changes_' + @cdcTableNameBase) + N' FOR cdc.'
 									   + QUOTENAME('fn_cdc_get_net_changes_' + @cdc_capture_instance);
 
 							EXEC sp_executesql @sql;
