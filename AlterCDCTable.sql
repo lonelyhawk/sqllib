@@ -10,7 +10,7 @@ CREATE OR ALTER PROCEDURE dbo.AlterCDCTable
     @source_name sysname,
     @captured_column_list NVARCHAR(MAX),
     @source_schema sysname = 'dbo',
-    @cdcRoleName sysname = NULL,
+    @role_name sysname = NULL,
     @supports_net_changes BIT = NULL,
     @filegroup_name sysname = NULL,
     @suppressMessages BIT = 0
@@ -258,7 +258,7 @@ BEGIN
     END;
 
     -- passing the NULLs in those variables to sp_cdc_enable_table to complain
-    SET @cdc_role_name = COALESCE(@cdcRoleName, @cdc_role_name);
+    SET @cdc_role_name = COALESCE(@role_name, @cdc_role_name);
     SET @cdc_supports_net_changes = COALESCE(@supports_net_changes, @cdc_supports_net_changes);
     SET @cdc_filegroup_name = COALESCE(@filegroup_name, @cdc_filegroup_name);
 
@@ -410,9 +410,11 @@ BEGIN
             SET @sql
                 = N'INSERT INTO cdc.' + QUOTENAME(@cdc_capture_instance + N'_CT') + N'(' + @listofcommonfields
                   + N',__$update_mask) SELECT ' + @listofcommonfields + N', IIF(__$update_mask is not null,' + @formula
-                  + N',null) as __$update_mask FROM cdc.' + QUOTENAME(@old_capture_instance + N'_CT');
-            --+ N' as o WHERE o.__$start_lsn < (select isnull(min(t.__$start_lsn),sys.fn_cdc_get_max_lsn()) from cdc.'
-            --+ QUOTENAME(@cdc_capture_instance + N'_CT') + N' as t WITH (NOLOCK))';
+                  + N',null) as __$update_mask FROM cdc.' + QUOTENAME(@old_capture_instance + N'_CT')
+                  + ';UPDATE dst SET start_lsn = newminlsn FROM cdc.change_tables dst CROSS APPLY '
+                  + '(SELECT MIN(__$start_lsn) AS newminlsn FROM  cdc.' + QUOTENAME(@cdc_capture_instance + N'_CT')+') AS t '
+                  + ' WHERE dst.OBJECT_ID = OBJECT_ID(''cdc.' + QUOTENAME(@cdc_capture_instance + N'_CT') + N''')'
+                  + ' AND dst.start_lsn > t.newminlsn';
             IF @suppressMessages = 0
                 PRINT N'The transitioning script is: ' + @sql;
 
