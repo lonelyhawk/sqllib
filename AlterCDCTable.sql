@@ -1,6 +1,5 @@
 /*
 The procedure alters the set of columns to capture by Change Data Capture, while taking care of the data in other CDC instance for the table.
-
 1. creates a new CDC capture instance (or drops it, if no fields were provided.)
 2. moves the matching fields from the old capture instance to the new one while taking care of the $update_mask field. (so if the f1 field was in the second position, it resulted in the 0x02 mask. If it has a different position (e.g. the third) now, the corresponding mask will show 0x04)
 3. creates the synonyms for the CDC functions, so the CDC-related logic does not need to care of the changes in the capture instance names.
@@ -10,10 +9,13 @@ CREATE OR ALTER PROCEDURE dbo.AlterCDCTable
     @source_name sysname,
     @captured_column_list NVARCHAR(MAX),
     @source_schema sysname = 'dbo',
+    @capture_instance sysname = NULL,
     @role_name sysname = NULL,
     @supports_net_changes BIT = NULL,
+    @index_name sysname = NULL,
     @filegroup_name sysname = NULL,
-    @suppressMessages BIT = 0
+    @allow_partition_switch BIT = NULL,
+    @suppressMessages BIT = 0    
 WITH EXECUTE AS CALLER
 AS
 BEGIN
@@ -45,7 +47,7 @@ BEGIN
           AND tb.name = @source_name;
 
     IF @table_object_id IS NULL
-        THROW 50000, 'The table does not exists. No changes is made.', 16;
+        THROW 50000, 'The source table is not found or you don''t have permissions to access it. No changes is made.', 16;
     -- craft the common part of the cdc-related entities
     DECLARE @cdcTableNameBase sysname = @source_schema + N'_' + @source_name;
 
@@ -56,6 +58,7 @@ BEGIN
             @old_capture_instance sysname,
             @cdc_capture_instance sysname,
             @cdc_supports_net_changes BIT,
+			@cdc_allow_partition_switch BIT,
             @cdc_table_id INT;
 
     -- cdc may or may not be enabled for the database. use the standard functions to avoid the compilation errors.
@@ -206,8 +209,8 @@ BEGIN
         END;
 
         -- obtain the possible capture instance name
-        SET @Index = 1;
-        SET @cdc_capture_instance = @cdcTableNameBase + N'_v' + CONVERT(sysname, @Index);
+        SET @Index = 0;
+        SET @cdc_capture_instance = COALESCE(@capture_instance, @cdcTableNameBase);
 
         WHILE EXISTS
     (
@@ -225,7 +228,7 @@ BEGIN
         END;
 
         IF @Index = 1000
-            THROW 50000, 'Too many capture instances for the table. No changes is made.', 16;
+            THROW 50000, 'Too many attempts to find the suitable capture instance for the table. No changes is made.', 16;
         IF @suppressMessages = 0
             PRINT 'The new capture instance is ' + @cdc_capture_instance;
     END;
@@ -261,6 +264,8 @@ BEGIN
     SET @cdc_role_name = COALESCE(@role_name, @cdc_role_name);
     SET @cdc_supports_net_changes = COALESCE(@supports_net_changes, @cdc_supports_net_changes);
     SET @cdc_filegroup_name = COALESCE(@filegroup_name, @cdc_filegroup_name);
+    SET @cdc_allow_partition_switch = COALESCE(@allow_partition_switch,@cdc_allow_partition_switch);
+    SET @cdc_index_name = COALESCE(@index_name,@cdc_index_name);
 
     -- sanity check:
     IF @columnsRemained > 0
@@ -338,7 +343,8 @@ BEGIN
                                                 @role_name = @cdc_role_name,
                                                 @index_name = @cdc_index_name,
                                                 @captured_column_list = @captured_column_list,
-                                                @filegroup_name = @cdc_filegroup_name;
+                                                @filegroup_name = @cdc_filegroup_name,
+                                                @allow_partition_switch = @cdc_allow_partition_switch;
 
             IF @res <> 0
                 THROW 50000, 'Unexpected error in sys.sp_cdc_enable_table', 16;
@@ -415,6 +421,7 @@ BEGIN
                   + '(SELECT MIN(__$start_lsn) AS newminlsn FROM  cdc.' + QUOTENAME(@cdc_capture_instance + N'_CT')+') AS t '
                   + ' WHERE dst.OBJECT_ID = OBJECT_ID(''cdc.' + QUOTENAME(@cdc_capture_instance + N'_CT') + N''')'
                   + ' AND dst.start_lsn > t.newminlsn';
+
             IF @suppressMessages = 0
                 PRINT N'The transitioning script is: ' + @sql;
 
