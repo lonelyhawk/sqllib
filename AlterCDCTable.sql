@@ -49,7 +49,7 @@ BEGIN
     IF @table_object_id IS NULL
         THROW 50000, 'The source table is not found or you don''t have permissions to access it. No changes is made.', 16;
     -- craft the common part of the cdc-related entities
-    DECLARE @cdcTableNameBase sysname = @source_schema + N'_' + @source_name;
+    DECLARE @cdcTableNameBase sysname = COALESCE(NULLIF(RTRIM(LTRIM(@capture_instance)),''), @source_schema + N'_' + @source_name);
 
     -- list of variables for the system CDC procedures
     DECLARE @cdc_role_name sysname,
@@ -59,11 +59,30 @@ BEGIN
             @cdc_capture_instance sysname,
             @cdc_supports_net_changes BIT,
 			@cdc_allow_partition_switch BIT,
+            @cdc_start_lsn BINARY(10),
             @cdc_table_id INT;
 
     -- cdc may or may not be enabled for the database. use the standard functions to avoid the compilation errors.
     -- the tables below will hold the record sets of those functions.
     DECLARE @cdc_change_table TABLE
+    (
+        source_schema sysname NOT NULL,
+        source_table sysname NOT NULL,
+        capture_instance sysname NOT NULL,
+        object_id INT NOT NULL,
+        source_object_id INT NULL,
+        start_lsn BINARY(10) NULL,
+        end_lsn BINARY(10) NULL,
+        supports_net_changes BIT NULL,
+        has_drop_pending BIT NULL,
+        role_name sysname NULL,
+        index_name sysname NULL,
+        filegroup_name sysname NULL,
+        create_date DATETIME NULL,
+        index_column_list NVARCHAR(MAX) NULL,
+        captured_column_list NVARCHAR(MAX) NULL
+    );
+    DECLARE @new_cdc_change_table TABLE
     (
         source_schema sysname NOT NULL,
         source_table sysname NOT NULL,
@@ -210,7 +229,7 @@ BEGIN
 
         -- obtain the possible capture instance name
         SET @Index = 0;
-        SET @cdc_capture_instance = COALESCE(@capture_instance, @cdcTableNameBase);
+        SET @cdc_capture_instance = @cdcTableNameBase;
 
         WHILE EXISTS
     (
@@ -307,20 +326,21 @@ BEGIN
             PRINT 'The following index will be used to uniquely identify rows in the source table: ' + @cdc_index_name;
     END;
     -- if there is something to change - create a new CDC instance and redirect the corresponding synonyms
-    DECLARE @res INT,
-            @sql NVARCHAR(4000),
-            @fn_netchanges_name NVARCHAR(4000)
-        =   QUOTENAME(@source_schema) + N'.' + QUOTENAME(N'fn_cdc_get_net_changes_' + @cdcTableNameBase),
-            @fn_allchanges_name NVARCHAR(4000) = QUOTENAME(@source_schema) + N'.'
-                                                 + QUOTENAME(N'fn_cdc_get_all_changes_' + @cdcTableNameBase);
+    DECLARE @res INT = 0,
+            @sql NVARCHAR(MAX) = '';
+    
     BEGIN TRANSACTION;
     BEGIN TRY
+        DECLARE @fn_netchanges_name NVARCHAR(4000)
+            =   QUOTENAME(@source_schema) + N'.' + QUOTENAME(N'fn_cdc_get_net_changes_' + @cdcTableNameBase),
+                @fn_allchanges_name NVARCHAR(4000) = QUOTENAME(@source_schema) + N'.'
+                                                 + QUOTENAME(N'fn_cdc_get_all_changes_' + @cdcTableNameBase);
         IF OBJECT_ID(@fn_allchanges_name, 'SN') IS NOT NULL
         BEGIN
             IF @suppressMessages = 0
                 PRINT 'Dropping the ALL_CHANGES synonym: ' + @fn_allchanges_name;
 
-            SET @sql = N'DROP SYNONYM ' + @fn_allchanges_name;
+            SET @sql = N'DROP SYNONYM ' + @fn_allchanges_name + N';';
             EXEC sp_executesql @sql;
         END;
 
@@ -330,7 +350,7 @@ BEGIN
             IF @suppressMessages = 0
                 PRINT 'Dropping the NET_CHANGES synonym: ' + @fn_netchanges_name;
 
-            SET @sql = N'DROP SYNONYM ' + @fn_netchanges_name;
+            SET @sql = N'DROP SYNONYM ' + @fn_netchanges_name + N';';
             EXEC sp_executesql @sql;
         END;
 
@@ -345,6 +365,7 @@ BEGIN
                                                 @captured_column_list = @captured_column_list,
                                                 @filegroup_name = @cdc_filegroup_name,
                                                 @allow_partition_switch = @cdc_allow_partition_switch;
+            
 
             IF @res <> 0
                 THROW 50000, 'Unexpected error in sys.sp_cdc_enable_table', 16;
@@ -372,6 +393,12 @@ BEGIN
         -- move all records of the previous CDC instance to the new one.
         IF @columnsRemained > 0
         BEGIN
+            INSERT INTO @new_cdc_change_table
+            EXEC sys.sp_cdc_help_change_data_capture @source_schema = @source_schema,
+                                                    @source_name = @source_name;
+            
+            SELECT @cdc_table_id = t.OBJECT_ID
+            FROM @new_cdc_change_table AS t WHERE capture_instance = @cdc_capture_instance;
             -- refill the table with the actual list of captured columns
             INSERT INTO @newColumnList
             EXEC sys.sp_cdc_get_captured_columns @capture_instance = @cdc_capture_instance;
@@ -416,11 +443,12 @@ BEGIN
             SET @sql
                 = N'INSERT INTO cdc.' + QUOTENAME(@cdc_capture_instance + N'_CT') + N'(' + @listofcommonfields
                   + N',__$update_mask) SELECT ' + @listofcommonfields + N', IIF(__$update_mask is not null,' + @formula
-                  + N',null) as __$update_mask FROM cdc.' + QUOTENAME(@old_capture_instance + N'_CT')
-                  + ';UPDATE dst SET start_lsn = newminlsn FROM cdc.change_tables dst CROSS APPLY '
-                  + '(SELECT MIN(__$start_lsn) AS newminlsn FROM  cdc.' + QUOTENAME(@cdc_capture_instance + N'_CT')+') AS t '
-                  + ' WHERE dst.OBJECT_ID = OBJECT_ID(''cdc.' + QUOTENAME(@cdc_capture_instance + N'_CT') + N''')'
-                  + ' AND dst.start_lsn > t.newminlsn';
+                  + N',null) as __$update_mask FROM cdc.' + QUOTENAME(@old_capture_instance + N'_CT')+ N' as t'
+                  + N' CROSS JOIN cdc.change_tables ct WHERE t.__$start_lsn < ct.start_lsn'
+                  + N';UPDATE dst SET start_lsn = newminlsn FROM cdc.change_tables dst CROSS JOIN '
+                  + N'(SELECT MIN(__$start_lsn) AS newminlsn FROM  cdc.' + QUOTENAME(@cdc_capture_instance + N'_CT')+N') AS t '
+                  + N' WHERE dst.OBJECT_ID = ' + CAST(@cdc_table_id AS nvarchar(16))
+                  + N' AND dst.start_lsn > t.newminlsn';
 
             IF @suppressMessages = 0
                 PRINT N'The transitioning script is: ' + @sql;
